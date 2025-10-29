@@ -58,21 +58,34 @@ print("=" * 60)
 print("🔌 Подключение к терминалам входа...")
 print("=" * 60)
 
+# Список недоступных терминалов
+unavailable_terminals = []
+
 for terminal_ip in TERMINALS_IN:
-    ip_bytes = terminal_ip.encode()
-    user_id = sdk.NET_DVR_Login_V30(ip_bytes, PORT, USER, PASS, None)
-    
-    if user_id < 0:
-        print(f"❌ Не удалось подключиться к {terminal_ip}")
-    else:
-        terminal_connections[terminal_ip] = user_id
-        print(f"✅ Подключено к {terminal_ip} (user_id: {user_id})")
+    try:
+        ip_bytes = terminal_ip.encode()
+        user_id = sdk.NET_DVR_Login_V30(ip_bytes, PORT, USER, PASS, None)
+        
+        if user_id < 0:
+            print(f"⚠️  Терминал {terminal_ip} недоступен - будет пропущен")
+            unavailable_terminals.append(terminal_ip)
+        else:
+            terminal_connections[terminal_ip] = user_id
+            print(f"✅ Подключено к {terminal_ip} (user_id: {user_id})")
+    except Exception as e:
+        print(f"⚠️  Ошибка подключения к {terminal_ip}: {e}")
+        unavailable_terminals.append(terminal_ip)
 
-if not terminal_connections:
-    print("❌ Не удалось подключиться ни к одному терминалу!")
-    exit(1)
+if terminal_connections:
+    print(f"\n✅ Успешно подключено к {len(terminal_connections)}/{len(TERMINALS_IN)} терминалам входа")
+    if unavailable_terminals:
+        print(f"⚠️  Недоступные терминалы: {', '.join(unavailable_terminals)}")
+        print("ℹ️  Система продолжит работу с доступными терминалами")
+else:
+    print("\n⚠️  Ни один терминал входа не подключен!")
+    print("ℹ️  Система будет работать в режиме мониторинга (без управления дверями)")
 
-print(f"\n✅ Успешно подключено к {len(terminal_connections)} терминалам входа")
+print(f"📊 Активных подключений: {len(terminal_connections)}")
 
 # =============================
 #   Подключение к БД
@@ -92,8 +105,9 @@ def open_door(terminal_ip, door_no=1, open_time=DOOR_OPEN_TIME):
     """Открыть дверь на определенном терминале"""
     user_id = terminal_connections.get(terminal_ip)
     
-    if not user_id:
-        print(f"⚠️ Терминал {terminal_ip} не подключен к SDK")
+    if user_id is None:
+        print(f"⚠️  Терминал {terminal_ip} не подключен к SDK - управление дверью недоступно")
+        print(f"ℹ️  Событие будет залогировано, но дверь не откроется")
         return False
     
     try:
@@ -101,7 +115,8 @@ def open_door(terminal_ip, door_no=1, open_time=DOOR_OPEN_TIME):
         result = sdk.NET_DVR_ControlGateway(user_id, door_no, 1)  # open door
         
         if result == 0:
-            print(f"⚠️ Не удалось открыть дверь на {terminal_ip}")
+            print(f"⚠️  Не удалось открыть дверь на {terminal_ip}")
+            print(f"ℹ️  Возможно терминал отключился - проверьте подключение")
             return False
         
         time.sleep(open_time)
@@ -110,6 +125,7 @@ def open_door(terminal_ip, door_no=1, open_time=DOOR_OPEN_TIME):
         return True
     except Exception as e:
         print(f"❌ Ошибка управления дверью на {terminal_ip}: {e}")
+        print(f"ℹ️  Терминал может быть недоступен")
         return False
 
 
@@ -210,9 +226,17 @@ def process_apb_event(user_name, device_ip, sub_event_type):
             action_taken = "ВХОД РАЗРЕШЕН"
             print(f"✅ {user_name} входит в здание через {device_ip}")
             
-            # Открываем дверь в отдельном потоке
-            threading.Thread(target=open_door, args=(device_ip,)).start()
-            door_opened = True
+            # Проверяем подключен ли терминал к SDK
+            if device_ip in terminal_connections:
+                # Открываем дверь в отдельном потоке
+                threading.Thread(target=open_door, args=(device_ip,)).start()
+                door_opened = True
+            else:
+                # Терминал не подключен - дверь не откроется
+                print(f"⚠️  Терминал {device_ip} не подключен к SDK")
+                print(f"ℹ️  Пользователю разрешен вход, но дверь не откроется автоматически")
+                door_opened = False
+            
             new_state = "inside"
             
             # Обновляем состояние в БД
@@ -268,7 +292,7 @@ os.makedirs("logs", exist_ok=True)
 @app.route("/event", methods=["POST"])
 def event():
     """Обработчик событий от терминалов Hikvision"""
-    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     log_dir = f"logs/{ts}"
     os.makedirs(log_dir, exist_ok=True)
 
