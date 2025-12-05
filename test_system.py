@@ -17,14 +17,34 @@ USERS = ["Иван Иванов", "Петр Петров", "Анна Сидор�
 
 # Терминалы
 TERMINALS = {
-    "entry": ["192.168.18.221", "192.168.18.223", "192.168.18.225", "192.168.18.227", "192.168.18.229"],
-    "exit": ["192.168.18.222", "192.168.18.224", "192.168.18.226", "192.168.18.228", "192.168.18.230"]
+    "entry": [
+        "192.168.18.221",
+        "192.168.18.223",
+        "192.168.18.225",
+        "192.168.18.227",
+        "192.168.18.229",
+        "192.168.18.231",
+        "192.168.18.233",
+        "192.168.18.235",
+        "192.168.18.237",
+    ],
+    "exit": [
+        "192.168.18.222",
+        "192.168.18.224",
+        "192.168.18.226",
+        "192.168.18.228",
+        "192.168.18.230",
+        "192.168.18.232",
+        "192.168.18.234",
+        "192.168.18.236",
+        "192.168.18.238",
+    ],
 }
 
 
 def send_event(user_name, terminal_ip, sub_event_type=75):
     """Отправить тестовое событие на сервер"""
-    
+
     event_data = {
         "AccessControllerEvent": {
             "subEventType": sub_event_type,  # 75 - карта, 117 - лицо
@@ -34,12 +54,12 @@ def send_event(user_name, terminal_ip, sub_event_type=75):
             "dateTime": time.strftime("%Y-%m-%dT%H:%M:%S"),
         }
     }
-    
+
     # Отправляем как form-data (как делает Hikvision)
     data = {
         "AccessControllerEvent": json.dumps(event_data["AccessControllerEvent"])
     }
-    
+
     try:
         # Эмулируем remote_addr через заголовок (в реальности Flask берет из request.remote_addr)
         # Для теста запускаем через прокси или модифицируем main.py для чтения X-Forwarded-For
@@ -48,12 +68,12 @@ def send_event(user_name, terminal_ip, sub_event_type=75):
             data=data,
             headers={"X-Forwarded-For": terminal_ip}
         )
-        
+
         if response.status_code == 200:
             print(f"✅ Событие отправлено: {user_name} → {terminal_ip}")
         else:
             print(f"❌ Ошибка: {response.status_code}")
-            
+
     except Exception as e:
         print(f"❌ Ошибка отправки: {e}")
 
@@ -63,14 +83,14 @@ def test_normal_flow():
     print("\n" + "="*60)
     print("ТЕСТ 1: Нормальный поток - вход и выход")
     print("="*60)
-    
+
     user = USERS[0]
-    
+
     print(f"\n1. {user} входит через терминал 221...")
     print("   (Дверь откроется только если терминал подключен к SDK)")
     send_event(user, TERMINALS["entry"][0])
     time.sleep(2)
-    
+
     print(f"\n2. {user} выходит через терминал 222...")
     send_event(user, TERMINALS["exit"][0])
     time.sleep(2)
@@ -82,18 +102,18 @@ def test_double_entry_violation():
     print("ТЕСТ 2: Попытка повторного входа (должна быть заблокирована)")
     print("="*60)
     print("ℹ️  APB логика заблокирует повторный вход независимо от статуса терминала")
-    
+
     user = USERS[1]
-    
+
     print(f"\n1. {user} входит через терминал 223...")
     send_event(user, TERMINALS["entry"][1])
     time.sleep(2)
-    
+
     print(f"\n2. {user} пытается войти повторно через терминал 225 (НАРУШЕНИЕ)...")
     print("   ⚠️  Система должна ЗАПРЕТИТЬ вход (пользователь уже внутри)")
     send_event(user, TERMINALS["entry"][2])
     time.sleep(2)
-    
+
     print(f"\n3. {user} выходит через терминал 224...")
     send_event(user, TERMINALS["exit"][1])
     time.sleep(2)
@@ -104,9 +124,9 @@ def test_exit_without_entry():
     print("\n" + "="*60)
     print("ТЕСТ 3: Попытка выхода без входа")
     print("="*60)
-    
+
     user = USERS[2]
-    
+
     print(f"\n1. {user} пытается выйти через терминал 226 (не входил)...")
     send_event(user, TERMINALS["exit"][2])
     time.sleep(2)
@@ -117,13 +137,13 @@ def test_multiple_terminals():
     print("\n" + "="*60)
     print("ТЕСТ 4: Вход через один терминал, выход через другой")
     print("="*60)
-    
+
     user = USERS[0]
-    
+
     print(f"\n1. {user} входит через терминал 227...")
     send_event(user, TERMINALS["entry"][3])
     time.sleep(2)
-    
+
     print(f"\n2. {user} выходит через терминал 230 (другой терминал)...")
     send_event(user, TERMINALS["exit"][4])
     time.sleep(2)
@@ -134,9 +154,9 @@ def test_face_recognition():
     print("\n" + "="*60)
     print("ТЕСТ 5: Событие распознавания лица")
     print("="*60)
-    
+
     user = USERS[1]
-    
+
     print(f"\n1. {user} входит по лицу через терминал 229...")
     send_event(user, TERMINALS["entry"][4], sub_event_type=117)
     time.sleep(2)
@@ -147,13 +167,13 @@ def check_status():
     print("\n" + "="*60)
     print("ТЕКУЩИЙ СТАТУС СИСТЕМЫ")
     print("="*60)
-    
+
     try:
         response = requests.get(f"{SERVER_URL}/status")
         if response.status_code == 200:
             data = response.json()
             print(f"\n📊 Пользователей внутри: {data['users_inside_count']}")
-            
+
             if data['users_inside']:
                 print("\n👥 Пользователи внутри:")
                 for user in data['users_inside']:
@@ -175,9 +195,9 @@ def main():
     print("\nℹ️  Система протестирует APB логику")
     print("ℹ️  Недоступные терминалы - это нормально!")
     print("   Двери не откроются на офлайн терминалах, но логика APB будет работать")
-    
+
     input("\nНажмите Enter для начала тестирования...")
-    
+
     # Проверка доступности сервера
     try:
         response = requests.get(SERVER_URL)
@@ -188,7 +208,7 @@ def main():
         print(f"❌ Не удалось подключиться к серверу {SERVER_URL}")
         print("   Убедитесь, что main.py запущен!")
         return
-    
+
     # Проверка статуса подключения терминалов
     print("\n" + "="*60)
     print("ПРОВЕРКА ПОДКЛЮЧЕНИЯ К СЕРВЕРУ")
@@ -198,36 +218,37 @@ def main():
         if response.status_code == 200:
             data = response.json()
             terminals_connected = data.get('terminals_connected', 0)
+            total_terminals = len(TERMINALS["entry"])
             print(f"✅ Сервер активен")
-            print(f"📊 Подключено терминалов входа к SDK: {terminals_connected}/5")
+            print(f"📊 Подключено терминалов входа к SDK: {terminals_connected}/{total_terminals}")
             if terminals_connected == 0:
                 print("\n⚠️  ВНИМАНИЕ: Ни один терминал не подключен к SDK")
                 print("   Тесты пройдут, но двери не будут открываться")
                 print("   APB логика и логирование будут работать")
-            elif terminals_connected < 5:
-                print(f"\nℹ️  {5 - terminals_connected} терминал(ов) недоступны")
+            elif terminals_connected < total_terminals:
+                print(f"\nℹ️  {total_terminals - terminals_connected} терминал(ов) недоступны")
                 print("   Это нормально - система работает с доступными терминалами")
         else:
             print("⚠️  Не удалось получить статус терминалов")
     except Exception as e:
         print(f"⚠️  Ошибка получения статуса: {e}")
-    
+
     # Запуск тестов
     test_normal_flow()
     check_status()
-    
+
     test_double_entry_violation()
     check_status()
-    
+
     test_exit_without_entry()
     check_status()
-    
+
     test_multiple_terminals()
     check_status()
-    
+
     test_face_recognition()
     check_status()
-    
+
     print("\n" + "="*60)
     print("✅ ТЕСТИРОВАНИЕ ЗАВЕРШЕНО")
     print("="*60)

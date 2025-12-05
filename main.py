@@ -12,6 +12,22 @@ from dotenv import load_dotenv
 from db import db
 
 # =============================
+#   Коды статусов событий APB
+# =============================
+
+# Успешные операции
+STATUS_SUCCESS_ENTRY = "SUCCESS_ENTRY"  # Успешный вход (outside -> inside)
+STATUS_SUCCESS_EXIT = "SUCCESS_EXIT"  # Успешный выход (inside -> outside)
+STATUS_ALLOWED_TIME_WINDOW = "ALLOWED_TIME_WINDOW"  # Разрешен вход в пределах временного окна
+
+# Нарушения APB (is_violation = TRUE)
+STATUS_DENIED_ALREADY_INSIDE = "DENIED_ALREADY_INSIDE"  # Запрещен вход - уже внутри (нарушение)
+STATUS_DENIED_OUTSIDE_WINDOW = "DENIED_OUTSIDE_WINDOW"  # Запрещен вход - вне временного окна (нарушение)
+
+# Предупреждения (не нарушения, но требует внимания)
+STATUS_WARNING_EXIT_WITHOUT_ENTRY = "WARNING_EXIT_WITHOUT_ENTRY"  # Предупреждение - выход без входа
+
+# =============================
 #   Загрузка конфигурации
 # =============================
 
@@ -24,6 +40,10 @@ TERMINALS_IN = [
     os.getenv("TERMINAL_IN_3"),
     os.getenv("TERMINAL_IN_4"),
     os.getenv("TERMINAL_IN_5"),
+    os.getenv("TERMINAL_IN_6"),
+    os.getenv("TERMINAL_IN_7"),
+    os.getenv("TERMINAL_IN_8"),
+    os.getenv("TERMINAL_IN_9"),
 ]
 
 # Терминалы выхода (четные)
@@ -33,6 +53,10 @@ TERMINALS_OUT = [
     os.getenv("TERMINAL_OUT_3"),
     os.getenv("TERMINAL_OUT_4"),
     os.getenv("TERMINAL_OUT_5"),
+    os.getenv("TERMINAL_OUT_6"),
+    os.getenv("TERMINAL_OUT_7"),
+    os.getenv("TERMINAL_OUT_8"),
+    os.getenv("TERMINAL_OUT_9"),
 ]
 
 # Учетные данные терминалов
@@ -43,6 +67,7 @@ PASS = os.getenv("TERMINAL_PASSWORD").encode()
 # Настройки APB
 RESET_TIME = os.getenv("RESET_TIME")  # Время ежедневного сброса
 DOOR_OPEN_TIME = int(os.getenv("DOOR_OPEN_TIME"))
+ENTRY_WINDOW_SECONDS = int(os.getenv("ENTRY_WINDOW_SECONDS", "60"))  # Время окна для повторного входа (секунды)
 
 # =============================
 #   Инициализация SDK
@@ -93,8 +118,26 @@ print(f"📊 Активных подключений: {len(terminal_connections)
 #   Подключение к БД
 # =============================
 
-if not db.connect():
-    print("❌ Не удалось подключиться к базе данных!")
+def wait_for_db(max_attempts=30, delay_seconds=2):
+    """
+    Ожидание готовности MySQL перед стартом приложения.
+    Пытаемся подключиться несколько раз с паузой.
+    """
+    attempt = 1
+    while attempt <= max_attempts:
+        print(f"🔄 Подключение к базе данных (попытка {attempt}/{max_attempts})...")
+        if db.connect():
+            return True
+
+        print(f"⚠️  База данных недоступна, следующая попытка через {delay_seconds} сек...")
+        time.sleep(delay_seconds)
+        attempt += 1
+
+    print("❌ Не удалось подключиться к базе данных после множества попыток!")
+    return False
+
+
+if not wait_for_db():
     exit(1)
 
 db.initialize_tables()
@@ -202,6 +245,8 @@ def process_apb_event(user_name, device_ip, sub_event_type):
 
     Правила:
     - Если пользователь внутри, он не может войти повторно через терминал входа
+      ИСКЛЮЧЕНИЕ: если с момента последней успешной аутентификации на терминале входа
+      прошло менее ENTRY_WINDOW_SECONDS секунд (окно времени для прохода через турникет)
     - Если пользователь снаружи, он может войти через любой терминал входа
     - Если пользователь внутри, он может выйти через любой терминал выхода
     - Если пользователь снаружи, он не может выйти (предупреждение)
@@ -215,29 +260,78 @@ def process_apb_event(user_name, device_ip, sub_event_type):
             return
 
         current_state = user_data.get('state', 'outside')
+        last_entry_auth_time = user_data.get('last_entry_auth_time')
         terminal_type = determine_terminal_type(device_ip)
 
         print(f"\n{'='*60}")
         print(f"👤 Пользователь: {user_name}")
         print(f"📍 Терминал: {device_ip} ({terminal_type})")
         print(f"📊 Текущее состояние: {current_state}")
+        if last_entry_auth_time:
+            print(f"⏰ Последняя аутентификация на входе: {last_entry_auth_time}")
         print(f"{'='*60}")
 
         action_taken = None
+        status_code = None
+        is_violation = False
         door_opened = False
         new_state = current_state
 
         # ===== ТЕРМИНАЛ ВХОДА =====
         if terminal_type == "entry":
+            # Обновляем время последней аутентификации на терминале входа
+            # Это нужно для отслеживания временного окна (даже если вход будет запрещен)
+            db.update_entry_auth_time(user_name, device_ip)
+
+            # Получаем обновленное время для проверки окна
+            updated_user_data = db.get_user_state(user_name)
+            current_auth_time = updated_user_data.get('last_entry_auth_time')
+
+            # Проверяем временное окно для повторного входа
+            within_time_window = False
+            if last_entry_auth_time and current_auth_time:
+                # Используем старое время для проверки окна (до обновления)
+                time_diff = (datetime.now() - last_entry_auth_time).total_seconds()
+                within_time_window = time_diff < ENTRY_WINDOW_SECONDS
+                if within_time_window:
+                    print(f"⏱️  Временное окно: {time_diff:.1f} сек назад (окно: {ENTRY_WINDOW_SECONDS} сек)")
+
+            status_code = None
+            is_violation = False
+
             if current_state == "inside":
-                # Пользователь уже внутри - запрещаем вход
-                action_taken = "ВХОД ЗАПРЕЩЕН - уже внутри"
-                print(f"⛔ {user_name} уже внутри здания - запрет повторного входа")
-                door_opened = False
+                if within_time_window:
+                    # Пользователь уже внутри, но в пределах временного окна - разрешаем повторный вход
+                    action_taken = f"ВХОД РАЗРЕШЕН - временное окно ({ENTRY_WINDOW_SECONDS} сек)"
+                    status_code = STATUS_ALLOWED_TIME_WINDOW
+                    is_violation = False
+                    print(f"✅ {user_name} входит повторно через {device_ip} (в пределах временного окна)")
+
+                    # Проверяем подключен ли терминал к SDK
+                    if device_ip in terminal_connections:
+                        # Открываем дверь в отдельном потоке
+                        threading.Thread(target=open_door, args=(device_ip,)).start()
+                        door_opened = True
+                    else:
+                        print(f"⚠️  Терминал {device_ip} не подключен к SDK")
+                        print(f"ℹ️  Пользователю разрешен вход, но дверь не откроется автоматически")
+                        door_opened = False
+                else:
+                    # Пользователь уже внутри и вне временного окна - запрещаем вход (НАРУШЕНИЕ APB)
+                    action_taken = "ВХОД ЗАПРЕЩЕН - уже внутри"
+                    status_code = STATUS_DENIED_ALREADY_INSIDE
+                    is_violation = True  # Это нарушение APB!
+                    print(f"⛔ {user_name} уже внутри здания - запрет повторного входа (НАРУШЕНИЕ APB)")
+                    if last_entry_auth_time:
+                        time_diff = (datetime.now() - last_entry_auth_time).total_seconds()
+                        print(f"ℹ️  С момента последней аутентификации прошло {time_diff:.1f} сек (окно: {ENTRY_WINDOW_SECONDS} сек)")
+                    door_opened = False
 
             else:  # current_state == "outside"
                 # Пользователь снаружи - разрешаем вход
                 action_taken = "ВХОД РАЗРЕШЕН"
+                status_code = STATUS_SUCCESS_ENTRY
+                is_violation = False
                 print(f"✅ {user_name} входит в здание через {device_ip}")
 
                 # Проверяем подключен ли терминал к SDK
@@ -261,6 +355,8 @@ def process_apb_event(user_name, device_ip, sub_event_type):
             if current_state == "inside":
                 # Пользователь внутри - разрешаем выход
                 action_taken = "ВЫХОД РАЗРЕШЕН"
+                status_code = STATUS_SUCCESS_EXIT
+                is_violation = False
                 print(f"🚪 {user_name} выходит из здания через {device_ip}")
 
                 # На выходе мы не управляем дверью через SDK (только входы подключены)
@@ -272,8 +368,10 @@ def process_apb_event(user_name, device_ip, sub_event_type):
                 db.update_user_state(user_name, new_state, device_ip)
 
             else:  # current_state == "outside"
-                # Пользователь снаружи пытается выйти - предупреждение
+                # Пользователь снаружи пытается выйти - предупреждение (не нарушение)
                 action_taken = "ВЫХОД ПРЕДУПРЕЖДЕНИЕ - не числится внутри"
+                status_code = STATUS_WARNING_EXIT_WITHOUT_ENTRY
+                is_violation = False
                 print(f"⚠️ {user_name} пытается выйти, но не числится внутри здания")
                 door_opened = False
 
@@ -285,6 +383,8 @@ def process_apb_event(user_name, device_ip, sub_event_type):
             event_type="AccessControl",
             sub_event_type=sub_event_type,
             action_taken=action_taken,
+            status_code=status_code,
+            is_violation=is_violation,
             state_before=current_state,
             state_after=new_state,
             door_opened=door_opened
@@ -398,6 +498,63 @@ def manual_reset():
     return {
         "status": "success",
         "message": f"Сброшено состояний: {affected}"
+    }, 200
+
+
+@app.route("/violations", methods=["GET"])
+def get_violations():
+    """Получить все нарушения APB"""
+    start_date = request.args.get("start_date")
+    end_date = request.args.get("end_date")
+    user_name = request.args.get("user_name")
+
+    violations = db.get_apb_violations(
+        start_date=start_date,
+        end_date=end_date,
+        user_name=user_name
+    )
+
+    return {
+        "status": "success",
+        "count": len(violations),
+        "violations": violations
+    }, 200
+
+
+@app.route("/violations/stats", methods=["GET"])
+def get_violation_stats():
+    """Получить статистику нарушений APB"""
+    start_date = request.args.get("start_date")
+    end_date = request.args.get("end_date")
+
+    stats = db.get_violation_statistics(
+        start_date=start_date,
+        end_date=end_date
+    )
+
+    return {
+        "status": "success",
+        "statistics": stats
+    }, 200
+
+
+@app.route("/violations/<status_code>", methods=["GET"])
+def get_violations_by_status(status_code):
+    """Получить нарушения по коду статуса"""
+    start_date = request.args.get("start_date")
+    end_date = request.args.get("end_date")
+
+    violations = db.get_violations_by_status_code(
+        status_code=status_code,
+        start_date=start_date,
+        end_date=end_date
+    )
+
+    return {
+        "status": "success",
+        "status_code": status_code,
+        "count": len(violations),
+        "violations": violations
     }, 200
 
 
