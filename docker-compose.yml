@@ -41,8 +41,10 @@ services:
       PMA_HOST: db
       PMA_USER: root
       PMA_PASSWORD: rootpass
+      TZ: Asia/Tashkent
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
     depends_on:
       - db
-
 volumes:
   db_data:
