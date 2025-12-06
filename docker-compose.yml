@@ -26,10 +26,13 @@ services:
       MYSQL_DATABASE: app_db
       MYSQL_USER: app_user
       MYSQL_PASSWORD: app_pass
+      TZ: Asia/Tashkent
     ports:
       - "3306:3306"
     volumes:
       - db_data:/var/lib/mysql
+      - /etc/localtime:/etc/localtime:ro
+      - ./mysql_conf:/etc/mysql/conf.d
 
   phpmyadmin:
     image: phpmyadmin/phpmyadmin
